@@ -1,15 +1,33 @@
-
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { io } from 'socket.io-client'
 import './App.css'
+
+const API_URL = 'http://localhost:4000'
+
+function formatReading(reading) {
+  const timestamp = reading.timestamp || reading.createdAt || new Date().toISOString()
+
+  return {
+    id: reading._id || `${timestamp}-${reading.temperature}-${reading.pressure}`,
+    timestamp,
+    time: new Date(timestamp).toLocaleTimeString(),
+    temperature: Number(reading.temperature),
+    pressure: Number(reading.pressure),
+    status: reading.status || (Number(reading.temperature) > 77 ? 'Warning' : 'Normal'),
+  }
+}
 
 function App() {
   const [activePage, setActivePage] = useState('overview')
 
-  const [temperature, setTemperature] = useState(72.5)
-  const [pressure, setPressure] = useState(34.8)
-  const [machineStatus, setMachineStatus] = useState('Normal')
-
+  const [temperature, setTemperature] = useState(null)
+  const [pressure, setPressure] = useState(null)
+  const [machineStatus, setMachineStatus] = useState('Waiting')
+  const [connectionStatus, setConnectionStatus] = useState('Connecting...')
   const [history, setHistory] = useState([])
+  const newestTimestamp = useRef(0)
+  const previousMachineStatus = useRef('Waiting')
+
   const [alerts, setAlerts] = useState([
     { id: 1, message: 'Temperature monitoring active', type: 'success', time: 'System startup' },
     { id: 2, message: 'Telemetry stream initialized', type: 'info', time: 'System startup' },
@@ -28,36 +46,82 @@ function App() {
   const [ruleThreshold, setRuleThreshold] = useState('75')
   const [ruleAction, setRuleAction] = useState('Generate Alert')
 
+  // Load saved MongoDB readings and listen for new readings from Socket.IO.
   useEffect(() => {
-    const interval = setInterval(() => {
-      setTemperature(value => {
-        const next = Number((value + (Math.random() - 0.5) * 1.5).toFixed(1))
-        return Math.max(68, Math.min(80, next))
+    const socket = io(API_URL, { transports: ['websocket'] })
+
+    const applyReading = (rawReading) => {
+      const reading = formatReading(rawReading)
+      const readingTime = new Date(reading.timestamp).getTime()
+
+      setHistory(previous => {
+        const withoutDuplicate = previous.filter(item => item.id !== reading.id)
+        return [...withoutDuplicate, reading]
+          .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+          .slice(-20)
       })
 
-      setPressure(value => {
-        const next = Number((value + (Math.random() - 0.5) * 0.8).toFixed(1))
-        return Math.max(30, Math.min(40, next))
-      })
-    }, 2000)
+      if (readingTime >= newestTimestamp.current) {
+        newestTimestamp.current = readingTime
+        setTemperature(reading.temperature)
+        setPressure(reading.pressure)
+        setMachineStatus(reading.status)
+      }
+    }
 
-    return () => clearInterval(interval)
+    socket.on('connect', () => setConnectionStatus('System Online'))
+    socket.on('disconnect', () => setConnectionStatus('Reconnecting...'))
+    socket.on('connect_error', () => setConnectionStatus('Backend Offline'))
+    socket.on('telemetry:new', applyReading)
+
+    const loadSavedReadings = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/telemetry?limit=20`)
+        if (!response.ok) throw new Error('Could not load telemetry data')
+
+        const result = await response.json()
+        if (!result.success || !Array.isArray(result.data)) {
+          throw new Error(result.message || 'Unexpected telemetry response')
+        }
+
+        // The API returns newest-first; the chart displays oldest-to-newest.
+        const savedReadings = result.data.map(formatReading).reverse()
+        setHistory(previous => {
+          const combined = [...savedReadings, ...previous]
+          const unique = Array.from(new Map(combined.map(item => [item.id, item])).values())
+          return unique
+            .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+            .slice(-20)
+        })
+
+        const latest = result.data[0]
+        if (latest) {
+          const latestReading = formatReading(latest)
+          const latestTime = new Date(latestReading.timestamp).getTime()
+          if (latestTime >= newestTimestamp.current) {
+            newestTimestamp.current = latestTime
+            setTemperature(latestReading.temperature)
+            setPressure(latestReading.pressure)
+            setMachineStatus(latestReading.status)
+          }
+        }
+      } catch (error) {
+        console.error('Telemetry fetch failed:', error)
+        setConnectionStatus('Backend Offline')
+      }
+    }
+
+    loadSavedReadings()
+
+    return () => {
+      socket.off('telemetry:new', applyReading)
+      socket.disconnect()
+    }
   }, [])
 
+  // Add a warning when the latest saved/live reading changes the machine to Warning.
   useEffect(() => {
-    setHistory(previous => [
-      ...previous.slice(-9),
-      {
-        time: new Date().toLocaleTimeString(),
-        temperature,
-        pressure,
-      },
-    ])
-  }, [temperature, pressure])
-
-  useEffect(() => {
-    if (temperature > 77 && machineStatus !== 'Warning') {
-      setMachineStatus('Warning')
+    if (machineStatus === 'Warning' && previousMachineStatus.current !== 'Warning') {
       setAlerts(previous => [
         {
           id: Date.now(),
@@ -67,10 +131,10 @@ function App() {
         },
         ...previous,
       ])
-    } else if (temperature <= 77 && machineStatus !== 'Normal') {
-      setMachineStatus('Normal')
     }
-  }, [temperature, machineStatus])
+
+    previousMachineStatus.current = machineStatus
+  }, [machineStatus, temperature])
 
   const addRule = (event) => {
     event.preventDefault()
@@ -138,6 +202,9 @@ function App() {
     </article>
   )
 
+  const temperatureDisplay = temperature === null ? '--' : `${temperature}°C`
+  const pressureDisplay = pressure === null ? '--' : `${pressure} bar`
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -172,7 +239,7 @@ function App() {
             <h1>{pageTitles[activePage]}</h1>
           </div>
           <div className="connection">
-            <span></span> System Online
+            <span></span> {connectionStatus}
           </div>
         </header>
 
@@ -189,9 +256,9 @@ function App() {
             </section>
 
             <section className="metrics">
-              <MetricCard title="Temperature" value={`${temperature}°C`} note="Live simulated reading" />
-              <MetricCard title="Machine Pressure" value={`${pressure} bar`} note="Live simulated reading" />
-              <MetricCard title="Machine Status" value={machineStatus} note="Based on temperature" />
+              <MetricCard title="Temperature" value={temperatureDisplay} note="Latest MongoDB reading" />
+              <MetricCard title="Machine Pressure" value={pressureDisplay} note="Latest MongoDB reading" />
+              <MetricCard title="Machine Status" value={machineStatus} note="Latest sensor status" />
               <MetricCard title="Active Rules" value={String(rules.filter(r => r.enabled).length).padStart(2, '0')} note="Configured rules" />
             </section>
 
@@ -255,32 +322,36 @@ function App() {
                 <h2>Live Telemetry Monitoring</h2>
                 <p>Monitor real-time machine sensor readings.</p>
               </div>
-              <span className="live-tag">● LIVE SIMULATION</span>
+              <span className="live-tag">● LIVE MONGODB DATA</span>
             </div>
 
             <section className="metrics">
-              <MetricCard title="Temperature" value={`${temperature}°C`} note="Turbine Sensor T-001" />
-              <MetricCard title="Pressure" value={`${pressure} bar`} note="Pressure Sensor P-001" />
+              <MetricCard title="Temperature" value={temperatureDisplay} note="Turbine Sensor T-001" />
+              <MetricCard title="Pressure" value={pressureDisplay} note="Pressure Sensor P-001" />
               <MetricCard title="Machine Status" value={machineStatus} note="Current operating condition" />
             </section>
 
             <article className="panel full-panel">
               <p className="eyebrow">SENSOR HISTORY</p>
               <h3>Temperature Readings</h3>
-              <div className="telemetry-chart">
-                {history.map((item, index) => (
-                  <div className="chart-column" key={index}>
-                    <span>{item.temperature}°</span>
-                    <div className="chart-track">
-                      <div
-                        className="chart-bar"
-                        style={{ height: `${Math.max(5, ((item.temperature - 65) / 20) * 100)}%` }}
-                      />
+              {history.length === 0 ? (
+                <p className="empty-state">No telemetry readings found. Send a reading to the backend to see it here.</p>
+              ) : (
+                <div className="telemetry-chart">
+                  {history.map(item => (
+                    <div className="chart-column" key={item.id}>
+                      <span>{item.temperature}°</span>
+                      <div className="chart-track">
+                        <div
+                          className="chart-bar"
+                          style={{ height: `${Math.max(5, ((item.temperature - 65) / 20) * 100)}%` }}
+                        />
+                      </div>
+                      <small>{item.time}</small>
                     </div>
-                    <small>{item.time}</small>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </article>
 
             <article className="panel full-panel">
@@ -297,16 +368,17 @@ function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {[...history].reverse().map((item, index) => (
-                      <tr key={index}>
+                    {[...history].reverse().map(item => (
+                      <tr key={item.id}>
                         <td>{item.time}</td>
                         <td>{item.temperature}°C</td>
                         <td>{item.pressure} bar</td>
-                        <td>{item.temperature > 77 ? 'Warning' : 'Normal'}</td>
+                        <td>{item.status}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
+                {history.length === 0 && <p className="empty-state">No saved readings yet.</p>}
               </div>
             </article>
           </section>
