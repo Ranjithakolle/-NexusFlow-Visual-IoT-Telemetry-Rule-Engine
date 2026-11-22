@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { io } from 'socket.io-client'
 import './App.css'
+import RuleBuilder from './RuleBuilder'
 
 const API_URL = 'http://localhost:4000'
 
@@ -395,6 +396,15 @@ function App() {
               </div>
               <span className="live-tag">{rules.filter(r => r.enabled).length} ACTIVE RULES</span>
             </div>
+
+            <article className="panel full-panel visual-builder-panel">
+              <p className="eyebrow">VISUAL WORKFLOW</p>
+              <h3>Build Your Rule Workflow</h3>
+              <p className="panel-description">
+                Drag nodes onto the canvas and connect them to design your automation flow.
+              </p>
+              <RuleBuilder />
+            </article>
 
             <article className="panel full-panel">
               <p className="eyebrow">CREATE AUTOMATION</p>
