@@ -20,8 +20,10 @@ const app = express();
 const httpServer = createServer(app);
 
 const PORT = process.env.PORT || 4000;
+
 const TELEMETRY_COLLECTION = "iot_telemetry_ts";
 const RULES_COLLECTION = "automation_rules";
+const WORKFLOWS_COLLECTION = "automation_workflows";
 
 mongoose.set("autoCreate", false);
 mongoose.set("autoIndex", false);
@@ -32,8 +34,8 @@ mongoose.set("autoIndex", false);
 
 app.use(
   cors({
-    origin: "http://localhost:5173",
-    methods: ["GET", "POST", "PATCH", "DELETE"]
+    origin: "http://localhost:5178",
+    methods: ["GET", "POST", "PATCH", "DELETE"],
   })
 );
 
@@ -45,9 +47,9 @@ app.use(express.json());
 
 const io = new Server(httpServer, {
   cors: {
-    origin: "http://localhost:5173",
-    methods: ["GET", "POST"]
-  }
+    origin: "http://localhost:517",
+    methods: ["GET", "POST"],
+  },
 });
 
 io.on("connection", (socket) => {
@@ -66,37 +68,42 @@ const telemetrySchema = new mongoose.Schema(
   {
     timestamp: {
       type: Date,
-      required: true
+      required: true,
     },
+
     metadata: {
       deviceId: {
         type: String,
-        required: true
+        required: true,
       },
+
       machineName: {
         type: String,
-        default: "Turbine"
-      }
+        default: "Turbine",
+      },
     },
+
     temperature: {
       type: Number,
-      required: true
+      required: true,
     },
+
     pressure: {
       type: Number,
-      required: true
+      required: true,
     },
+
     status: {
       type: String,
       enum: ["Normal", "Warning"],
-      default: "Normal"
-    }
+      default: "Normal",
+    },
   },
   {
     versionKey: false,
     collection: TELEMETRY_COLLECTION,
     autoCreate: false,
-    autoIndex: false
+    autoIndex: false,
   }
 );
 
@@ -116,41 +123,50 @@ const ruleSchema = new mongoose.Schema(
       type: String,
       required: true,
       trim: true,
-      maxlength: 100
+      maxlength: 100,
     },
+
     sensor: {
       type: String,
       required: true,
-      enum: ["Temperature", "Pressure"]
+      enum: ["Temperature", "Pressure"],
     },
+
     operator: {
       type: String,
       required: true,
-      enum: [">", "<", ">=", "<="]
+      enum: [">", "<", ">=", "<="],
     },
+
     threshold: {
       type: Number,
       required: true,
       validate: {
         validator: Number.isFinite,
-        message: "Threshold must be a finite number."
-      }
+        message: "Threshold must be a finite number.",
+      },
     },
+
     action: {
       type: String,
       required: true,
-      enum: ["Generate Alert", "Monitor Machine", "Send Notification"]
+      enum: [
+        "Generate Alert",
+        "Monitor Machine",
+        "Send Notification",
+      ],
     },
+
     enabled: {
       type: Boolean,
-      default: true
-    }
+      default: true,
+    },
   },
   {
     timestamps: true,
     collection: RULES_COLLECTION,
     autoCreate: false,
-    autoIndex: false
+    autoIndex: false,
   }
 );
 
@@ -159,6 +175,49 @@ const AutomationRule = mongoose.model(
   ruleSchema,
   RULES_COLLECTION
 );
+
+// =====================================================
+// MONGODB VISUAL WORKFLOW MODEL
+// =====================================================
+
+const workflowSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 100,
+    },
+
+    nodes: {
+      type: [mongoose.Schema.Types.Mixed],
+      required: true,
+      default: [],
+    },
+
+    edges: {
+      type: [mongoose.Schema.Types.Mixed],
+      required: true,
+      default: [],
+    },
+  },
+  {
+    timestamps: true,
+    collection: WORKFLOWS_COLLECTION,
+    autoCreate: false,
+    autoIndex: false,
+  }
+);
+
+const AutomationWorkflow = mongoose.model(
+  "AutomationWorkflow",
+  workflowSchema,
+  WORKFLOWS_COLLECTION
+);
+
+// =====================================================
+// SERIALIZATION HELPERS
+// =====================================================
 
 function serializeRule(rule) {
   return {
@@ -170,7 +229,18 @@ function serializeRule(rule) {
     action: rule.action,
     enabled: rule.enabled,
     createdAt: rule.createdAt,
-    updatedAt: rule.updatedAt
+    updatedAt: rule.updatedAt,
+  };
+}
+
+function serializeWorkflow(workflow) {
+  return {
+    id: workflow._id.toString(),
+    name: workflow.name,
+    nodes: workflow.nodes,
+    edges: workflow.edges,
+    createdAt: workflow.createdAt,
+    updatedAt: workflow.updatedAt,
   };
 }
 
@@ -180,15 +250,23 @@ function serializeRule(rule) {
 
 async function ensureCollection(name, options = {}) {
   const db = mongoose.connection.db;
-  const existing = await db.listCollections({ name }).toArray();
+
+  const existing = await db
+    .listCollections({ name })
+    .toArray();
 
   if (existing.length === 0) {
     await db.createCollection(name, options);
+
     console.log(`MongoDB collection "${name}" created!`);
+
     return;
   }
 
-  if (options.timeseries && !existing[0].options?.timeseries) {
+  if (
+    options.timeseries &&
+    !existing[0].options?.timeseries
+  ) {
     throw new Error(
       `${name} already exists as a normal collection. Please check it in MongoDB Atlas.`
     );
@@ -198,18 +276,28 @@ async function ensureCollection(name, options = {}) {
 }
 
 async function setupDatabaseCollections() {
+  // Time-Series telemetry collection
+
   await ensureCollection(TELEMETRY_COLLECTION, {
     timeseries: {
       timeField: "timestamp",
       metaField: "metadata",
-      granularity: "seconds"
-    }
+      granularity: "seconds",
+    },
   });
+
+  // Automation rules collection
 
   await ensureCollection(RULES_COLLECTION);
 
+  // Visual workflows collection
+
+  await ensureCollection(WORKFLOWS_COLLECTION);
+
   // Seed starter rules only when the collection is empty.
-  const existingRuleCount = await AutomationRule.countDocuments();
+
+  const existingRuleCount =
+    await AutomationRule.countDocuments();
 
   if (existingRuleCount === 0) {
     await AutomationRule.insertMany([
@@ -219,7 +307,7 @@ async function setupDatabaseCollections() {
         operator: ">",
         threshold: 77,
         action: "Generate Alert",
-        enabled: true
+        enabled: true,
       },
       {
         name: "High Pressure Alert",
@@ -227,7 +315,7 @@ async function setupDatabaseCollections() {
         operator: ">",
         threshold: 38,
         action: "Generate Alert",
-        enabled: true
+        enabled: true,
       },
       {
         name: "Machine Monitoring",
@@ -235,8 +323,8 @@ async function setupDatabaseCollections() {
         operator: "<",
         threshold: 80,
         action: "Monitor Machine",
-        enabled: true
-      }
+        enabled: true,
+      },
     ]);
 
     console.log("Starter automation rules inserted!");
@@ -251,7 +339,10 @@ app.get("/api/health", (req, res) => {
   res.json({
     success: true,
     message: "NexusFlow backend is running!",
-    database: mongoose.connection.readyState === 1 ? "Connected" : "Disconnected"
+    database:
+      mongoose.connection.readyState === 1
+        ? "Connected"
+        : "Disconnected",
   });
 });
 
@@ -260,28 +351,38 @@ app.get("/api/health", (req, res) => {
 // =====================================================
 
 // GET ALL RULES
+
 app.get("/api/rules", async (req, res) => {
   try {
-    const rules = await AutomationRule.find().sort({ createdAt: 1 });
+    const rules = await AutomationRule.find().sort({
+      createdAt: 1,
+    });
 
     res.json({
       success: true,
-      rules: rules.map(serializeRule)
+      rules: rules.map(serializeRule),
     });
   } catch (error) {
     console.error("Error fetching rules:", error);
 
     res.status(500).json({
       success: false,
-      message: "Failed to fetch automation rules."
+      message: "Failed to fetch automation rules.",
     });
   }
 });
 
 // CREATE A NEW RULE
+
 app.post("/api/rules", async (req, res) => {
   try {
-    const { name, sensor, operator, threshold, action } = req.body;
+    const {
+      name,
+      sensor,
+      operator,
+      threshold,
+      action,
+    } = req.body;
 
     if (
       !name ||
@@ -293,7 +394,7 @@ app.post("/api/rules", async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        message: "Please provide valid rule details."
+        message: "Please provide valid rule details.",
       });
     }
 
@@ -303,31 +404,34 @@ app.post("/api/rules", async (req, res) => {
       operator,
       threshold: Number(threshold),
       action,
-      enabled: true
+      enabled: true,
     });
 
     res.status(201).json({
       success: true,
       message: "Automation rule created successfully!",
-      rule: serializeRule(rule)
+      rule: serializeRule(rule),
     });
   } catch (error) {
     console.error("Error creating rule:", error);
 
     res.status(400).json({
       success: false,
-      message: error.message || "Failed to create automation rule."
+      message:
+        error.message ||
+        "Failed to create automation rule.",
     });
   }
 });
 
 // ENABLE / DISABLE A RULE
+
 app.patch("/api/rules/:id", async (req, res) => {
   try {
     if (typeof req.body.enabled !== "boolean") {
       return res.status(400).json({
         success: false,
-        message: "The enabled field must be true or false."
+        message: "The enabled field must be true or false.",
       });
     }
 
@@ -340,47 +444,131 @@ app.patch("/api/rules/:id", async (req, res) => {
     if (!rule) {
       return res.status(404).json({
         success: false,
-        message: "Rule not found."
+        message: "Rule not found.",
       });
     }
 
     res.json({
       success: true,
       message: "Rule updated successfully!",
-      rule: serializeRule(rule)
+      rule: serializeRule(rule),
     });
   } catch (error) {
     console.error("Error updating rule:", error);
 
     res.status(400).json({
       success: false,
-      message: "Failed to update rule."
+      message: "Failed to update rule.",
     });
   }
 });
 
 // DELETE A RULE
+
 app.delete("/api/rules/:id", async (req, res) => {
   try {
-    const rule = await AutomationRule.findByIdAndDelete(req.params.id);
+    const rule = await AutomationRule.findByIdAndDelete(
+      req.params.id
+    );
 
     if (!rule) {
       return res.status(404).json({
         success: false,
-        message: "Rule not found."
+        message: "Rule not found.",
       });
     }
 
     res.json({
       success: true,
-      message: "Rule deleted successfully!"
+      message: "Rule deleted successfully!",
     });
   } catch (error) {
     console.error("Error deleting rule:", error);
 
     res.status(400).json({
       success: false,
-      message: "Failed to delete rule."
+      message: "Failed to delete rule.",
+    });
+  }
+});
+
+// =====================================================
+// VISUAL WORKFLOW APIs
+// =====================================================
+
+// GET ALL SAVED WORKFLOWS
+
+app.get("/api/workflows", async (req, res) => {
+  try {
+    const workflows = await AutomationWorkflow.find()
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    res.json({
+      success: true,
+      count: workflows.length,
+      workflows: workflows.map(serializeWorkflow),
+    });
+  } catch (error) {
+    console.error("Error fetching workflows:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch visual workflows.",
+    });
+  }
+});
+
+// SAVE A NEW VISUAL WORKFLOW
+
+app.post("/api/workflows", async (req, res) => {
+  try {
+    const { name, nodes, edges } = req.body;
+
+    if (
+      !name ||
+      typeof name !== "string" ||
+      !name.trim() ||
+      name.trim().length > 100
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid workflow name.",
+      });
+    }
+
+    if (
+      !Array.isArray(nodes) ||
+      nodes.length === 0 ||
+      !Array.isArray(edges)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid workflow nodes and edges are required.",
+      });
+    }
+
+    const workflow = await AutomationWorkflow.create({
+      name: name.trim(),
+      nodes,
+      edges,
+    });
+
+    console.log(`Workflow saved: ${workflow.name}`);
+
+    res.status(201).json({
+      success: true,
+      message: "Visual workflow saved successfully!",
+      workflow: serializeWorkflow(workflow),
+    });
+  } catch (error) {
+    console.error("Error saving workflow:", error);
+
+    res.status(400).json({
+      success: false,
+      message:
+        error.message ||
+        "Failed to save visual workflow.",
     });
   }
 });
@@ -409,7 +597,9 @@ function evaluateCondition(value, operator, threshold) {
 }
 
 async function evaluateAutomationRules(telemetry) {
-  const rules = await AutomationRule.find({ enabled: true });
+  const rules = await AutomationRule.find({
+    enabled: true,
+  });
 
   const triggeredRules = [];
 
@@ -432,11 +622,12 @@ async function evaluateAutomationRules(telemetry) {
 
       io.emit("rule:triggered", {
         rule: triggeredRule,
+
         telemetry: {
           temperature: telemetry.temperature,
           pressure: telemetry.pressure,
-          timestamp: telemetry.timestamp
-        }
+          timestamp: telemetry.timestamp,
+        },
       });
 
       console.log(`Rule triggered: ${rule.name}`);
@@ -448,11 +639,13 @@ async function evaluateAutomationRules(telemetry) {
         io.emit("alert:new", {
           id: new mongoose.Types.ObjectId().toString(),
           title: rule.name,
+
           message:
             `${rule.sensor} ${rule.operator} ${rule.threshold}. ` +
             `Current value: ${sensorValue}`,
+
           severity: "Warning",
-          timestamp: new Date()
+          timestamp: new Date(),
         });
       }
     }
@@ -461,13 +654,18 @@ async function evaluateAutomationRules(telemetry) {
   return triggeredRules;
 }
 
- // =====================================================
+// =====================================================
 // TELEMETRY INGESTION API
 // =====================================================
 
 app.post("/api/telemetry", async (req, res) => {
   try {
-    const { temperature, pressure, deviceId, machineName } = req.body;
+    const {
+      temperature,
+      pressure,
+      deviceId,
+      machineName,
+    } = req.body;
 
     if (
       !Number.isFinite(Number(temperature)) ||
@@ -475,23 +673,28 @@ app.post("/api/telemetry", async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        message: "Valid temperature and pressure values are required."
+        message:
+          "Valid temperature and pressure values are required.",
       });
     }
 
     const telemetryData = {
       timestamp: new Date(),
+
       metadata: {
         deviceId: deviceId || "TURBINE-001",
-        machineName: machineName || "Turbine"
+        machineName: machineName || "Turbine",
       },
+
       temperature: Number(temperature),
       pressure: Number(pressure),
-      status: "Normal"
+      status: "Normal",
     };
 
     // Evaluate saved automation rules before inserting telemetry.
-    const triggeredRules = await evaluateAutomationRules(telemetryData);
+
+    const triggeredRules =
+      await evaluateAutomationRules(telemetryData);
 
     const hasAlert = triggeredRules.some(
       (rule) =>
@@ -499,10 +702,14 @@ app.post("/api/telemetry", async (req, res) => {
         rule.action === "Send Notification"
     );
 
-    telemetryData.status = hasAlert ? "Warning" : "Normal";
+    telemetryData.status = hasAlert
+      ? "Warning"
+      : "Normal";
 
     // Insert telemetry into MongoDB Time-Series collection.
-    const savedTelemetry = await Telemetry.create(telemetryData);
+
+    const savedTelemetry =
+      await Telemetry.create(telemetryData);
 
     const responseData = {
       _id: savedTelemetry._id,
@@ -510,17 +717,18 @@ app.post("/api/telemetry", async (req, res) => {
       metadata: savedTelemetry.metadata,
       temperature: savedTelemetry.temperature,
       pressure: savedTelemetry.pressure,
-      status: savedTelemetry.status
+      status: savedTelemetry.status,
     };
 
     // Send new telemetry to connected frontend clients.
+
     io.emit("telemetry:new", responseData);
 
     res.status(201).json({
       success: true,
       message: "Telemetry saved successfully!",
       data: responseData,
-      triggeredRules
+      triggeredRules,
     });
   } catch (error) {
     console.error("Telemetry ingestion error:", error);
@@ -528,7 +736,7 @@ app.post("/api/telemetry", async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to process telemetry.",
-      error: error.message
+      error: error.message,
     });
   }
 });
@@ -540,7 +748,10 @@ app.post("/api/telemetry", async (req, res) => {
 app.get("/api/telemetry", async (req, res) => {
   try {
     const limit = Math.min(
-      Math.max(Number.parseInt(req.query.limit, 10) || 50, 1),
+      Math.max(
+        Number.parseInt(req.query.limit, 10) || 50,
+        1
+      ),
       500
     );
 
@@ -552,14 +763,14 @@ app.get("/api/telemetry", async (req, res) => {
     res.json({
       success: true,
       count: telemetry.length,
-      data: telemetry
+      data: telemetry,
     });
   } catch (error) {
     console.error("Error fetching telemetry:", error);
 
     res.status(500).json({
       success: false,
-      message: "Failed to fetch telemetry history."
+      message: "Failed to fetch telemetry history.",
     });
   }
 });
@@ -573,7 +784,9 @@ async function startServer() {
     const mongoUri = process.env.MONGODB_URI;
 
     if (!mongoUri) {
-      throw new Error("MONGO_URI is missing from the server .env file.");
+      throw new Error(
+        "MONGODB_URI is missing from the server .env file."
+      );
     }
 
     await mongoose.connect(mongoUri);
@@ -583,10 +796,16 @@ async function startServer() {
     await setupDatabaseCollections();
 
     httpServer.listen(PORT, () => {
-      console.log(`NexusFlow server running at http://localhost:${PORT}`);
+      console.log(
+        `NexusFlow server running at http://localhost:${PORT}`
+      );
     });
   } catch (error) {
-    console.error("Failed to start NexusFlow server:", error);
+    console.error(
+      "Failed to start NexusFlow server:",
+      error
+    );
+
     process.exit(1);
   }
 }

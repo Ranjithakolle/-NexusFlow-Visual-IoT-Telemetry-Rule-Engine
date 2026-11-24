@@ -1,5 +1,5 @@
 
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import {
   ReactFlow,
@@ -16,6 +16,8 @@ import {
 } from '@xyflow/react';
 
 import '@xyflow/react/dist/style.css';
+
+const API_URL = 'http://localhost:4000';
 
 // =====================================================
 // INITIAL WORKFLOW
@@ -106,21 +108,14 @@ function CustomNode({ id, data }) {
   };
 
   return (
-    <div
-      className="rule-flow-node"
-      style={nodeStyle}
-    >
+    <div className="rule-flow-node" style={nodeStyle}>
       {data.kind !== 'sensor' && (
-        <Handle
-          type="target"
-          position={Position.Left}
-        />
+        <Handle type="target" position={Position.Left} />
       )}
 
       {data.kind === 'sensor' && (
         <>
           <strong>🌡️ Sensor Input</strong>
-
           <p>Choose the sensor source</p>
 
           <select
@@ -140,7 +135,6 @@ function CustomNode({ id, data }) {
       {data.kind === 'condition' && (
         <>
           <strong>⚙️ Threshold Condition</strong>
-
           <p>Configure the comparison</p>
 
           <select
@@ -173,7 +167,6 @@ function CustomNode({ id, data }) {
       {data.kind === 'action' && (
         <>
           <strong>🚨 Action</strong>
-
           <p>Choose what happens when the condition matches</p>
 
           <select
@@ -192,10 +185,7 @@ function CustomNode({ id, data }) {
       )}
 
       {data.kind !== 'action' && (
-        <Handle
-          type="source"
-          position={Position.Right}
-        />
+        <Handle type="source" position={Position.Right} />
       )}
     </div>
   );
@@ -221,6 +211,50 @@ export default function RuleBuilder() {
 
   const [edges, setEdges, onEdgesChange] =
     useEdgesState(initialEdges);
+
+  const [workflowName, setWorkflowName] = useState('');
+  const [savedWorkflows, setSavedWorkflows] = useState([]);
+  const [selectedWorkflow, setSelectedWorkflow] = useState('');
+
+  const [loadingWorkflows, setLoadingWorkflows] = useState(false);
+  const [savingWorkflow, setSavingWorkflow] = useState(false);
+  const [message, setMessage] = useState('');
+  const [messageType, setMessageType] = useState('');
+
+  // =====================================================
+  // LOAD SAVED WORKFLOWS FROM MONGODB
+  // =====================================================
+
+  const fetchWorkflows = useCallback(async () => {
+    setLoadingWorkflows(true);
+
+    try {
+      const response = await fetch(`${API_URL}/api/workflows`);
+
+      if (!response.ok) {
+        throw new Error('Could not fetch saved workflows.');
+      }
+
+      const result = await response.json();
+
+      setSavedWorkflows(result.workflows || []);
+    } catch (error) {
+      console.error('Workflow loading error:', error);
+
+      setMessage('Could not load saved workflows.');
+      setMessageType('error');
+    } finally {
+      setLoadingWorkflows(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchWorkflows();
+  }, [fetchWorkflows]);
+
+  // =====================================================
+  // CONNECT NODES
+  // =====================================================
 
   const onConnect = useCallback(
     (connection) => {
@@ -275,6 +309,97 @@ export default function RuleBuilder() {
   };
 
   // =====================================================
+  // SAVE WORKFLOW TO MONGODB
+  // =====================================================
+
+  const saveWorkflow = async () => {
+    const name = workflowName.trim();
+
+    if (!name) {
+      setMessage('Please enter a workflow name.');
+      setMessageType('error');
+      return;
+    }
+
+    if (nodes.length === 0) {
+      setMessage('Add at least one node before saving.');
+      setMessageType('error');
+      return;
+    }
+
+    setSavingWorkflow(true);
+    setMessage('');
+
+    try {
+      const response = await fetch(`${API_URL}/api/workflows`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name,
+          nodes,
+          edges,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(
+          result.message || 'Failed to save workflow.'
+        );
+      }
+
+      setMessage(`Workflow "${name}" saved successfully!`);
+      setMessageType('success');
+
+      setSelectedWorkflow(
+        result.workflow?._id || result.workflow?.id || ''
+      );
+
+      await fetchWorkflows();
+    } catch (error) {
+      console.error('Workflow saving error:', error);
+
+      setMessage(error.message || 'Could not save workflow.');
+      setMessageType('error');
+    } finally {
+      setSavingWorkflow(false);
+    }
+  };
+
+  // =====================================================
+  // LOAD SELECTED WORKFLOW
+  // =====================================================
+
+  const loadWorkflow = () => {
+    if (!selectedWorkflow) {
+      setMessage('Please select a saved workflow.');
+      setMessageType('error');
+      return;
+    }
+
+    const workflow = savedWorkflows.find(
+      (item) =>
+        String(item._id || item.id) === selectedWorkflow
+    );
+
+    if (!workflow) {
+      setMessage('Selected workflow could not be found.');
+      setMessageType('error');
+      return;
+    }
+
+    setNodes(workflow.nodes || []);
+    setEdges(workflow.edges || []);
+    setWorkflowName(workflow.name || '');
+
+    setMessage(`Workflow "${workflow.name}" loaded successfully!`);
+    setMessageType('success');
+  };
+
+  // =====================================================
   // UI
   // =====================================================
 
@@ -289,6 +414,8 @@ export default function RuleBuilder() {
           </p>
         </div>
       </div>
+
+      {/* ADD NODES */}
 
       <div
         style={{
@@ -319,6 +446,126 @@ export default function RuleBuilder() {
           + Action
         </button>
       </div>
+
+      {/* SAVE WORKFLOW */}
+
+      <div
+        style={{
+          background: '#ffffff',
+          border: '1px solid #e2e8f0',
+          borderRadius: '10px',
+          padding: '14px',
+          marginBottom: '14px',
+        }}
+      >
+        <h3 style={{ marginTop: 0 }}>Save Your Workflow</h3>
+
+        <input
+          type="text"
+          value={workflowName}
+          onChange={(event) => setWorkflowName(event.target.value)}
+          placeholder="Enter workflow name"
+          maxLength={100}
+          style={{
+            width: '100%',
+            padding: '10px',
+            border: '1px solid #cbd5e1',
+            borderRadius: '6px',
+            marginBottom: '10px',
+            boxSizing: 'border-box',
+          }}
+        />
+
+        <button
+          className="add-rule-node-btn"
+          onClick={saveWorkflow}
+          disabled={savingWorkflow}
+          style={{
+            width: '100%',
+            opacity: savingWorkflow ? 0.6 : 1,
+          }}
+        >
+          {savingWorkflow ? 'Saving...' : 'Save Workflow'}
+        </button>
+
+        {message && (
+          <p
+            role="status"
+            style={{
+              marginBottom: 0,
+              fontSize: '13px',
+              color:
+                messageType === 'success' ? '#15803d' : '#dc2626',
+            }}
+          >
+            {message}
+          </p>
+        )}
+      </div>
+
+      {/* LOAD WORKFLOW */}
+
+      <div
+        style={{
+          background: '#ffffff',
+          border: '1px solid #e2e8f0',
+          borderRadius: '10px',
+          padding: '14px',
+          marginBottom: '14px',
+        }}
+      >
+        <h3 style={{ marginTop: 0 }}>Saved Workflows</h3>
+
+        <select
+          value={selectedWorkflow}
+          onChange={(event) => setSelectedWorkflow(event.target.value)}
+          style={{
+            width: '100%',
+            padding: '10px',
+            border: '1px solid #cbd5e1',
+            borderRadius: '6px',
+            marginBottom: '10px',
+          }}
+        >
+          <option value="">Select a saved workflow</option>
+
+          {savedWorkflows.map((workflow) => {
+            const id = String(workflow._id || workflow.id);
+
+            return (
+              <option key={id} value={id}>
+                {workflow.name}
+              </option>
+            );
+          })}
+        </select>
+
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button
+            className="add-rule-node-btn"
+            onClick={loadWorkflow}
+            disabled={!selectedWorkflow}
+          >
+            Load Workflow
+          </button>
+
+          <button
+            className="add-rule-node-btn"
+            onClick={fetchWorkflows}
+            disabled={loadingWorkflows}
+          >
+            {loadingWorkflows ? 'Refreshing...' : 'Refresh List'}
+          </button>
+        </div>
+
+        {savedWorkflows.length === 0 && !loadingWorkflows && (
+          <p style={{ fontSize: '12px', color: '#64748b' }}>
+            No saved workflows yet. Create and save your first workflow.
+          </p>
+        )}
+      </div>
+
+      {/* VISUAL CANVAS */}
 
       <div className="rule-flow-canvas">
         <ReactFlow
