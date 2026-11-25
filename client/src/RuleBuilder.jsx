@@ -315,18 +315,78 @@ export default function RuleBuilder() {
   const saveWorkflow = async () => {
     const name = workflowName.trim();
 
+    // 1. Validate workflow name
     if (!name) {
       setMessage('Please enter a workflow name.');
       setMessageType('error');
       return;
     }
 
-    if (nodes.length === 0) {
-      setMessage('Add at least one node before saving.');
+    // 2. Find the required workflow nodes
+    const sensorNode = nodes.find((node) => node.type === 'sensor');
+    const conditionNode = nodes.find((node) => node.type === 'condition');
+    const actionNode = nodes.find((node) => node.type === 'action');
+
+    if (!sensorNode) {
+      setMessage('Please add a Sensor node.');
       setMessageType('error');
       return;
     }
 
+    if (!conditionNode) {
+      setMessage('Please add a Condition node.');
+      setMessageType('error');
+      return;
+    }
+
+    if (!actionNode) {
+      setMessage('Please add an Action node.');
+      setMessageType('error');
+      return;
+    }
+
+    // 3. Validate the condition threshold
+    const thresholdValue = conditionNode.data?.threshold;
+    const threshold = Number(thresholdValue);
+
+    if (
+      thresholdValue === undefined ||
+      thresholdValue === null ||
+      String(thresholdValue).trim() === '' ||
+      !Number.isFinite(threshold)
+    ) {
+      setMessage('Please enter a valid numeric threshold.');
+      setMessageType('error');
+      return;
+    }
+
+    // 4. Validate Sensor -> Condition connection
+    const sensorConnected = edges.some(
+      (edge) =>
+        edge.source === sensorNode.id &&
+        edge.target === conditionNode.id
+    );
+
+    if (!sensorConnected) {
+      setMessage('Connect the Sensor node to the Condition node.');
+      setMessageType('error');
+      return;
+    }
+
+    // 5. Validate Condition -> Action connection
+    const actionConnected = edges.some(
+      (edge) =>
+        edge.source === conditionNode.id &&
+        edge.target === actionNode.id
+    );
+
+    if (!actionConnected) {
+      setMessage('Connect the Condition node to the Action node.');
+      setMessageType('error');
+      return;
+    }
+
+    // All validations passed. Save the workflow to MongoDB.
     setSavingWorkflow(true);
     setMessage('');
 

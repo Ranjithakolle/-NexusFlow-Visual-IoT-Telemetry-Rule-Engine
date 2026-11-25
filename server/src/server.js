@@ -34,7 +34,7 @@ mongoose.set("autoIndex", false);
 
 app.use(
   cors({
-    origin: "http://localhost:5178",
+    origin: "http://localhost:5179",
     methods: ["GET", "POST", "PATCH", "DELETE"],
   })
 );
@@ -47,7 +47,7 @@ app.use(express.json());
 
 const io = new Server(httpServer, {
   cors: {
-    origin: "http://localhost:517",
+    origin: "http://localhost:5179",
     methods: ["GET", "POST"],
   },
 });
