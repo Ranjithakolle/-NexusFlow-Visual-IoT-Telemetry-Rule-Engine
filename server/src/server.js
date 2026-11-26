@@ -9,6 +9,7 @@ import dotenv from "dotenv";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import mongoose from "mongoose";
+import { compileWorkflow } from "./services/workflowCompiler.js";
 
 dotenv.config();
 
@@ -245,6 +246,94 @@ function serializeWorkflow(workflow) {
 }
 
 // =====================================================
+// RXJS WORKFLOW RUNTIME MANAGER
+// =====================================================
+
+const activeWorkflowRuntimes = new Map();
+
+function handleWorkflowAction(event) {
+  console.log(
+    `Workflow triggered: ${event.workflowName} | ` +
+    `${event.sensor}: ${event.evaluatedValue}`
+  );
+
+  io.emit("workflow:triggered", event);
+
+  if (
+    event.action === "Generate Alert" ||
+    event.action === "Send Notification"
+  ) {
+    io.emit("alert:new", {
+      id: new mongoose.Types.ObjectId().toString(),
+      title: event.workflowName,
+      message:
+        `${event.sensor} condition matched. ` +
+        `Processed value: ${event.evaluatedValue}`,
+      severity: "Warning",
+      timestamp: event.triggeredAt,
+    });
+  }
+}
+
+function activateWorkflow(workflow) {
+  const workflowId = workflow._id
+    ? workflow._id.toString()
+    : String(workflow.id);
+
+  const existingRuntime = activeWorkflowRuntimes.get(workflowId);
+
+  if (existingRuntime) {
+    existingRuntime.stop();
+    activeWorkflowRuntimes.delete(workflowId);
+  }
+
+  const runtime = compileWorkflow(
+    {
+      id: workflowId,
+      name: workflow.name,
+      nodes: workflow.nodes,
+      edges: workflow.edges,
+    },
+    {
+      onAction: handleWorkflowAction,
+    }
+  );
+
+  runtime.start();
+  activeWorkflowRuntimes.set(workflowId, runtime);
+
+  console.log(`Workflow runtime activated: ${workflow.name}`);
+}
+
+async function refreshWorkflowRuntimes() {
+  for (const runtime of activeWorkflowRuntimes.values()) {
+    runtime.stop();
+  }
+
+  activeWorkflowRuntimes.clear();
+
+  const workflows = await AutomationWorkflow.find().lean();
+
+  let activatedCount = 0;
+
+  for (const workflow of workflows) {
+    try {
+      activateWorkflow(workflow);
+      activatedCount++;
+    } catch (error) {
+      console.error(
+        `Could not activate workflow "${workflow.name}":`,
+        error.message
+      );
+    }
+  }
+
+  console.log(
+    `Workflow runtime ready: ${activatedCount}/${workflows.length} workflow(s) activated.`
+  );
+}
+
+// =====================================================
 // CREATE / VERIFY MONGODB COLLECTIONS
 // =====================================================
 
@@ -276,8 +365,6 @@ async function ensureCollection(name, options = {}) {
 }
 
 async function setupDatabaseCollections() {
-  // Time-Series telemetry collection
-
   await ensureCollection(TELEMETRY_COLLECTION, {
     timeseries: {
       timeField: "timestamp",
@@ -286,11 +373,7 @@ async function setupDatabaseCollections() {
     },
   });
 
-  // Automation rules collection
-
   await ensureCollection(RULES_COLLECTION);
-
-  // Visual workflows collection
 
   await ensureCollection(WORKFLOWS_COLLECTION);
 
@@ -548,6 +631,19 @@ app.post("/api/workflows", async (req, res) => {
       });
     }
 
+    // Validate the graph by compiling it before saving.
+
+    compileWorkflow(
+      {
+        name: name.trim(),
+        nodes,
+        edges,
+      },
+      {
+        onAction: () => {},
+      }
+    );
+
     const workflow = await AutomationWorkflow.create({
       name: name.trim(),
       nodes,
@@ -555,6 +651,10 @@ app.post("/api/workflows", async (req, res) => {
     });
 
     console.log(`Workflow saved: ${workflow.name}`);
+
+    // Activate the newly saved workflow.
+
+    activateWorkflow(workflow);
 
     res.status(201).json({
       success: true,
@@ -576,7 +676,44 @@ app.post("/api/workflows", async (req, res) => {
 // =====================================================
 // RULE EVALUATION HELPERS
 // =====================================================
+// DELETE WORKFLOW
+app.delete("/api/workflows/:id", async (req, res) => {
+    try {
+        const workflow = await AutomationWorkflow.findByIdAndDelete(
+            req.params.id
+        );
 
+        if (!workflow) {
+            return res.status(404).json({
+                success: false,
+                message: "Workflow not found"
+            });
+        }
+
+        const workflowId = workflow._id.toString();
+
+        // Stop the workflow runtime
+        const runtime = activeWorkflowRuntimes.get(workflowId);
+
+        if (runtime) {
+            runtime.stop();
+            activeWorkflowRuntimes.delete(workflowId);
+        }
+
+        return res.json({
+            success: true,
+            message: "Workflow deleted successfully"
+        });
+
+    } catch (error) {
+        console.error("Workflow deletion error:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to delete workflow"
+        });
+    }
+});
 function evaluateCondition(value, operator, threshold) {
   switch (operator) {
     case ">":
@@ -691,10 +828,16 @@ app.post("/api/telemetry", async (req, res) => {
       status: "Normal",
     };
 
-    // Evaluate saved automation rules before inserting telemetry.
+    // Evaluate saved automation rules.
 
     const triggeredRules =
       await evaluateAutomationRules(telemetryData);
+
+    // Execute telemetry through active visual workflows.
+
+    for (const runtime of activeWorkflowRuntimes.values()) {
+      runtime.execute(telemetryData);
+    }
 
     const hasAlert = triggeredRules.some(
       (rule) =>
@@ -794,6 +937,10 @@ async function startServer() {
     console.log("MongoDB connected successfully!");
 
     await setupDatabaseCollections();
+
+    // Load and activate previously saved workflows.
+
+    await refreshWorkflowRuntimes();
 
     httpServer.listen(PORT, () => {
       console.log(

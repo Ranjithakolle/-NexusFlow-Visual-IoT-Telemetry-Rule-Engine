@@ -113,6 +113,8 @@ function CustomNode({ id, data }) {
         <Handle type="target" position={Position.Left} />
       )}
 
+      {/* SENSOR NODE */}
+
       {data.kind === 'sensor' && (
         <>
           <strong>🌡️ Sensor Input</strong>
@@ -131,6 +133,81 @@ function CustomNode({ id, data }) {
           </select>
         </>
       )}
+
+      {/* MATH NODE */}
+
+      {data.kind === 'math' && (
+        <>
+          <strong>🧮 Math Operation</strong>
+          <p>Transform incoming sensor readings</p>
+
+          <select
+            className="nodrag"
+            style={fieldStyle}
+            value={data.operation}
+            onChange={(event) =>
+              updateField('operation', event.target.value)
+            }
+          >
+            <option value="movingAverage">Moving Average</option>
+            <option value="scale">Multiply / Scale</option>
+            <option value="add">Add / Offset</option>
+          </select>
+
+          {data.operation === 'movingAverage' && (
+            <>
+              <label>Window Size</label>
+              <input
+                className="nodrag"
+                style={fieldStyle}
+                type="number"
+                min="1"
+                max="1000"
+                value={data.windowSize}
+                onChange={(event) =>
+                  updateField('windowSize', event.target.value)
+                }
+                placeholder="Enter window size"
+              />
+              <small>Number of readings used for the average.</small>
+            </>
+          )}
+
+          {data.operation === 'scale' && (
+            <>
+              <label>Multiply Factor</label>
+              <input
+                className="nodrag"
+                style={fieldStyle}
+                type="number"
+                value={data.factor}
+                onChange={(event) =>
+                  updateField('factor', event.target.value)
+                }
+                placeholder="Enter multiplication factor"
+              />
+            </>
+          )}
+
+          {data.operation === 'add' && (
+            <>
+              <label>Offset Amount</label>
+              <input
+                className="nodrag"
+                style={fieldStyle}
+                type="number"
+                value={data.amount}
+                onChange={(event) =>
+                  updateField('amount', event.target.value)
+                }
+                placeholder="Enter amount to add"
+              />
+            </>
+          )}
+        </>
+      )}
+
+      {/* CONDITION NODE */}
 
       {data.kind === 'condition' && (
         <>
@@ -163,6 +240,8 @@ function CustomNode({ id, data }) {
           />
         </>
       )}
+
+      {/* ACTION NODE */}
 
       {data.kind === 'action' && (
         <>
@@ -197,6 +276,7 @@ function CustomNode({ id, data }) {
 
 const nodeTypes = {
   sensor: CustomNode,
+  math: CustomNode,
   condition: CustomNode,
   action: CustomNode,
 };
@@ -283,11 +363,21 @@ export default function RuleBuilder() {
         kind: 'sensor',
         sensor: 'Temperature',
       },
+
+      math: {
+        kind: 'math',
+        operation: 'movingAverage',
+        windowSize: '3',
+        factor: '2',
+        amount: '5',
+      },
+
       condition: {
         kind: 'condition',
         operator: '>',
         threshold: '77',
       },
+
       action: {
         kind: 'action',
         action: 'Generate Alert',
@@ -315,37 +405,47 @@ export default function RuleBuilder() {
   const saveWorkflow = async () => {
     const name = workflowName.trim();
 
-    // 1. Validate workflow name
     if (!name) {
       setMessage('Please enter a workflow name.');
       setMessageType('error');
       return;
     }
 
-    // 2. Find the required workflow nodes
-    const sensorNode = nodes.find((node) => node.type === 'sensor');
-    const conditionNode = nodes.find((node) => node.type === 'condition');
-    const actionNode = nodes.find((node) => node.type === 'action');
+    const sensorNodes = nodes.filter((node) => node.type === 'sensor');
+    const mathNodes = nodes.filter((node) => node.type === 'math');
+    const conditionNodes = nodes.filter((node) => node.type === 'condition');
+    const actionNodes = nodes.filter((node) => node.type === 'action');
 
-    if (!sensorNode) {
-      setMessage('Please add a Sensor node.');
+    if (sensorNodes.length !== 1) {
+      setMessage('A workflow must contain exactly one Sensor node.');
       setMessageType('error');
       return;
     }
 
-    if (!conditionNode) {
-      setMessage('Please add a Condition node.');
+    if (conditionNodes.length !== 1) {
+      setMessage('A workflow must contain exactly one Condition node.');
       setMessageType('error');
       return;
     }
 
-    if (!actionNode) {
-      setMessage('Please add an Action node.');
+    if (actionNodes.length !== 1) {
+      setMessage('A workflow must contain exactly one Action node.');
       setMessageType('error');
       return;
     }
 
-    // 3. Validate the condition threshold
+    if (nodes.some((node) => !['sensor', 'math', 'condition', 'action'].includes(node.type))) {
+      setMessage('Your workflow contains an unsupported node.');
+      setMessageType('error');
+      return;
+    }
+
+    const sensorNode = sensorNodes[0];
+    const conditionNode = conditionNodes[0];
+    const actionNode = actionNodes[0];
+
+    // Validate threshold
+
     const thresholdValue = conditionNode.data?.threshold;
     const threshold = Number(thresholdValue);
 
@@ -360,33 +460,85 @@ export default function RuleBuilder() {
       return;
     }
 
-    // 4. Validate Sensor -> Condition connection
-    const sensorConnected = edges.some(
-      (edge) =>
-        edge.source === sensorNode.id &&
-        edge.target === conditionNode.id
-    );
+    // Validate math node settings
 
-    if (!sensorConnected) {
-      setMessage('Connect the Sensor node to the Condition node.');
+    for (const mathNode of mathNodes) {
+      const data = mathNode.data || {};
+
+      if (data.operation === 'movingAverage') {
+        const size = Number(data.windowSize);
+
+        if (
+          !Number.isInteger(size) ||
+          size < 1 ||
+          size > 1000
+        ) {
+          setMessage('Moving Average window size must be between 1 and 1000.');
+          setMessageType('error');
+          return;
+        }
+      } else if (data.operation === 'scale') {
+        if (
+          data.factor === '' ||
+          !Number.isFinite(Number(data.factor))
+        ) {
+          setMessage('Please enter a valid Multiply / Scale factor.');
+          setMessageType('error');
+          return;
+        }
+      } else if (data.operation === 'add') {
+        if (
+          data.amount === '' ||
+          !Number.isFinite(Number(data.amount))
+        ) {
+          setMessage('Please enter a valid Add / Offset amount.');
+          setMessageType('error');
+          return;
+        }
+      } else {
+        setMessage('Please select a valid Math operation.');
+        setMessageType('error');
+        return;
+      }
+    }
+
+    // Validate the complete linear workflow path:
+    // Sensor -> Math (optional) -> Condition -> Action
+
+    const expectedPath = [
+      sensorNode,
+      ...mathNodes,
+      conditionNode,
+      actionNode,
+    ];
+
+    if (edges.length !== expectedPath.length - 1) {
+      setMessage('Connect every node in one continuous workflow path.');
       setMessageType('error');
       return;
     }
 
-    // 5. Validate Condition -> Action connection
-    const actionConnected = edges.some(
-      (edge) =>
-        edge.source === conditionNode.id &&
-        edge.target === actionNode.id
-    );
+    for (let index = 0; index < expectedPath.length - 1; index++) {
+      const currentNode = expectedPath[index];
+      const nextNode = expectedPath[index + 1];
 
-    if (!actionConnected) {
-      setMessage('Connect the Condition node to the Action node.');
-      setMessageType('error');
-      return;
+      const connected = edges.some(
+        (edge) =>
+          edge.source === currentNode.id &&
+          edge.target === nextNode.id
+      );
+
+      if (!connected) {
+        setMessage(
+          `Connect ${currentNode.data.kind} to ${nextNode.data.kind} in the correct order.`
+        );
+        setMessageType('error');
+        return;
+      }
     }
 
-    // All validations passed. Save the workflow to MongoDB.
+    // Save workflow
+
     setSavingWorkflow(true);
     setMessage('');
 
@@ -470,7 +622,7 @@ export default function RuleBuilder() {
         <div>
           <h2>Visual Rule Builder</h2>
           <p>
-            Configure sensors, conditions and automation actions.
+            Configure sensors, math operations, conditions and automation actions.
           </p>
         </div>
       </div>
@@ -490,6 +642,13 @@ export default function RuleBuilder() {
           onClick={() => addNode('sensor')}
         >
           + Sensor
+        </button>
+
+        <button
+          className="add-rule-node-btn"
+          onClick={() => addNode('math')}
+        >
+          + Math Operation
         </button>
 
         <button
