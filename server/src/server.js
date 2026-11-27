@@ -1,4 +1,3 @@
-
 import dns from "node:dns";
 
 dns.setServers(["8.8.8.8", "8.8.4.4"]);
@@ -86,12 +85,22 @@ const telemetrySchema = new mongoose.Schema(
 
     temperature: {
       type: Number,
-      required: true,
     },
 
     pressure: {
       type: Number,
-      required: true,
+    },
+
+    humidity: {
+      type: Number,
+    },
+
+    vibration: {
+      type: Number,
+    },
+
+    flowRate: {
+      type: Number,
     },
 
     status: {
@@ -130,7 +139,7 @@ const ruleSchema = new mongoose.Schema(
     sensor: {
       type: String,
       required: true,
-      enum: ["Temperature", "Pressure"],
+      enum: ["Temperature", "Pressure", "Humidity", "Vibration", "Flow Rate"],
     },
 
     operator: {
@@ -228,7 +237,7 @@ function serializeRule(rule) {
     operator: rule.operator,
     threshold: rule.threshold,
     action: rule.action,
-    enabled: rule.enabled,
+        enabled: rule.enabled,
     createdAt: rule.createdAt,
     updatedAt: rule.updatedAt,
   };
@@ -428,7 +437,6 @@ app.get("/api/health", (req, res) => {
         : "Disconnected",
   });
 });
-
 // =====================================================
 // AUTOMATION RULE APIs
 // =====================================================
@@ -676,44 +684,47 @@ app.post("/api/workflows", async (req, res) => {
 // =====================================================
 // RULE EVALUATION HELPERS
 // =====================================================
+
 // DELETE WORKFLOW
+
 app.delete("/api/workflows/:id", async (req, res) => {
-    try {
-        const workflow = await AutomationWorkflow.findByIdAndDelete(
-            req.params.id
-        );
+  try {
+    const workflow = await AutomationWorkflow.findByIdAndDelete(
+      req.params.id
+    );
 
-        if (!workflow) {
-            return res.status(404).json({
-                success: false,
-                message: "Workflow not found"
-            });
-        }
-
-        const workflowId = workflow._id.toString();
-
-        // Stop the workflow runtime
-        const runtime = activeWorkflowRuntimes.get(workflowId);
-
-        if (runtime) {
-            runtime.stop();
-            activeWorkflowRuntimes.delete(workflowId);
-        }
-
-        return res.json({
-            success: true,
-            message: "Workflow deleted successfully"
-        });
-
-    } catch (error) {
-        console.error("Workflow deletion error:", error);
-
-        return res.status(500).json({
-            success: false,
-            message: "Failed to delete workflow"
-        });
+    if (!workflow) {
+      return res.status(404).json({
+        success: false,
+        message: "Workflow not found",
+      });
     }
+
+    const workflowId = workflow._id.toString();
+    const runtime = activeWorkflowRuntimes.get(workflowId);
+
+    if (runtime) {
+      runtime.stop();
+      activeWorkflowRuntimes.delete(workflowId);
+    }
+
+    res.json({
+      success: true,
+      message: "Workflow deleted successfully!",
+    });
+  } catch (error) {
+    console.error("Error deleting workflow:", error);
+
+    res.status(400).json({
+      success: false,
+      message: "Failed to delete workflow.",
+    });
+  }
 });
+// =====================================================
+// RULE EVALUATION HELPERS
+// =====================================================
+
 function evaluateCondition(value, operator, threshold) {
   switch (operator) {
     case ">":
@@ -733,6 +744,14 @@ function evaluateCondition(value, operator, threshold) {
   }
 }
 
+const SENSOR_FIELDS = {
+  Temperature: "temperature",
+  Pressure: "pressure",
+  Humidity: "humidity",
+  Vibration: "vibration",
+  "Flow Rate": "flowRate",
+};
+
 async function evaluateAutomationRules(telemetry) {
   const rules = await AutomationRule.find({
     enabled: true,
@@ -741,10 +760,13 @@ async function evaluateAutomationRules(telemetry) {
   const triggeredRules = [];
 
   for (const rule of rules) {
-    const sensorValue =
-      rule.sensor === "Temperature"
-        ? telemetry.temperature
-        : telemetry.pressure;
+    const sensorField = SENSOR_FIELDS[rule.sensor];
+    const sensorValue = telemetry[sensorField];
+
+    // Skip rules when this telemetry record does not contain that sensor.
+    if (!Number.isFinite(sensorValue)) {
+      continue;
+    }
 
     const matched = evaluateCondition(
       sensorValue,
@@ -763,6 +785,9 @@ async function evaluateAutomationRules(telemetry) {
         telemetry: {
           temperature: telemetry.temperature,
           pressure: telemetry.pressure,
+          humidity: telemetry.humidity,
+          vibration: telemetry.vibration,
+          flowRate: telemetry.flowRate,
           timestamp: telemetry.timestamp,
         },
       });
@@ -800,19 +825,39 @@ app.post("/api/telemetry", async (req, res) => {
     const {
       temperature,
       pressure,
+      humidity,
+      vibration,
+      flowRate,
       deviceId,
       machineName,
     } = req.body;
 
-    if (
-      !Number.isFinite(Number(temperature)) ||
-      !Number.isFinite(Number(pressure))
-    ) {
+    const sensorInputs = {
+      temperature,
+      pressure,
+      humidity,
+      vibration,
+      flowRate,
+    };
+
+    const providedSensors = Object.entries(sensorInputs).filter(
+      ([, value]) => value !== undefined && value !== null && value !== ""
+    );
+
+    if (providedSensors.length === 0) {
       return res.status(400).json({
         success: false,
-        message:
-          "Valid temperature and pressure values are required.",
+        message: "Provide at least one valid sensor reading.",
       });
+    }
+
+    for (const [field, value] of providedSensors) {
+      if (!Number.isFinite(Number(value))) {
+        return res.status(400).json({
+          success: false,
+          message: `The ${field} value must be a finite number.`,
+        });
+      }
     }
 
     const telemetryData = {
@@ -823,8 +868,10 @@ app.post("/api/telemetry", async (req, res) => {
         machineName: machineName || "Turbine",
       },
 
-      temperature: Number(temperature),
-      pressure: Number(pressure),
+      ...Object.fromEntries(
+        providedSensors.map(([field, value]) => [field, Number(value)])
+      ),
+
       status: "Normal",
     };
 
@@ -860,6 +907,9 @@ app.post("/api/telemetry", async (req, res) => {
       metadata: savedTelemetry.metadata,
       temperature: savedTelemetry.temperature,
       pressure: savedTelemetry.pressure,
+      humidity: savedTelemetry.humidity,
+      vibration: savedTelemetry.vibration,
+      flowRate: savedTelemetry.flowRate,
       status: savedTelemetry.status,
     };
 
@@ -883,7 +933,6 @@ app.post("/api/telemetry", async (req, res) => {
     });
   }
 });
-
 // =====================================================
 // GET TELEMETRY HISTORY
 // =====================================================
@@ -913,7 +962,7 @@ app.get("/api/telemetry", async (req, res) => {
 
     res.status(500).json({
       success: false,
-      message: "Failed to fetch telemetry history.",
+      message: "Failed to fetch telemetry.",
     });
   }
 });

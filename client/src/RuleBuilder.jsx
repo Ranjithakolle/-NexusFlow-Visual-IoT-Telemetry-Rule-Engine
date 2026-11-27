@@ -128,8 +128,11 @@ function CustomNode({ id, data }) {
               updateField('sensor', event.target.value)
             }
           >
-            <option value="Temperature">Temperature</option>
-            <option value="Pressure">Pressure</option>
+           <option value="Temperature">Temperature</option>
+<option value="Pressure">Pressure</option>
+<option value="Humidity">Humidity</option>
+<option value="Vibration">Vibration</option>
+<option value="Flow Rate">Flow Rate</option>
           </select>
         </>
       )}
